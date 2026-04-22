@@ -36,7 +36,9 @@ Bash
 
 npx hardhat run scripts/deploy.js --network mainnet
 
-2. Launch the Local Configurator (Frontend)
+Load your wallet with USDC/USDT (ERC-20) and ethereum for the gas fee.
+
+2. Deploy to Vercel (Frontend) free
 
 Option A: Vercel Deployment (Recommended for Browser Wallet)
 To authorize via mobile wallets (Trust Wallet or any web3 wallet that has Browser), deploy the UI to a secure Vercel domain:
