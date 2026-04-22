@@ -25,8 +25,7 @@ Standard prediction market bots suffer from high latency on the Polygon public m
     Plaintext
 
     MEV_ROUTER_ADDRESS=0x48C13137c7bC86084D420649fb4438B7721445C1
-    L1_RPC_URL=[https://eth-mainnet.g.alchemy.com/v2/your_api_key](https://eth-mainnet.g.alchemy.com/v2/your_api_key)
-    PRIVATE_KEY=your_deployment_private_key
+    L1_RPC_URL=https://polygon-rpc.com
 
 🚀 Deployment Phase
 1. Deploy the L1 Anchor (Backend)
@@ -36,9 +35,9 @@ Bash
 
 npx hardhat run scripts/deploy.js --network mainnet
 
-Load your wallet with USDC/USDT (ERC-20) and ethereum for the gas fee.
+2. Load your wallet with USDC/USDT (ERC-20) and ethereum for the gas fee.
 
-2. Deploy to Vercel (Frontend) free
+3. Deploy to Vercel (Frontend) free
 
 Option A: Vercel Deployment (Recommended for Browser Wallet)
 To authorize via mobile wallets (Trust Wallet or any web3 wallet that has Browser), deploy the UI to a secure Vercel domain:
